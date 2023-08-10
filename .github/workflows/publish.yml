@@ -1,0 +1,35 @@
+name: publish
+on:
+  pull_request:
+  push:
+    branches:
+      - 'main'
+
+jobs:
+  unit:
+    name: Publish Stew
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - uses: actions/setup-go@v3
+        with:
+          go-version: '1.21'
+
+      - uses: actions/checkout@v3
+
+      - name: Install Dagger CLI
+        env:
+          DAGGER_VERSION: 0.8.1
+        working-directory: /usr/local
+        run: curl -L https://dl.dagger.io/dagger/install.sh | sh
+
+      - name: Run Dagger pipeline
+        env:
+          STEW_BUILD_REGISTRY: ghcr.io
+          STEW_BUILD_USERNAME: "${{ github.repository_owner }}"
+          STEW_BUILD_PASSWORD: "${{ secrets.GITHUB_TOKEN }}"
+          STEW_BUILD_IMAGE_NAME: stew:latest
+        run: dagger run go run ./build/main.go image publish
