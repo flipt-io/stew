@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"time"
 
 	"code.gitea.io/sdk/gitea"
@@ -54,7 +53,7 @@ func fatalOnError(err error) {
 }
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	set := flag.NewFlagSet("stew", flag.ContinueOnError)
 	var (
@@ -71,6 +70,8 @@ func main() {
 
 	var conf Config
 	fatalOnError(yaml.NewDecoder(fi).Decode(&conf))
+
+	slog.Debug("Parsed config", "config", conf)
 
 	if conf.URL == "" {
 		fatalOnError(errors.New("Must supply Gitea URL"))
@@ -217,6 +218,12 @@ func copyAndPush(conf Config, repo *git.Repository, hash plumbing.Hash, branch, 
 		}
 
 		if d.IsDir() {
+			if path == "." {
+				return nil
+			}
+
+			slog.Debug("Create dir", "path", path)
+
 			return tree.Filesystem.MkdirAll(path, 0755)
 		}
 
@@ -225,19 +232,14 @@ func copyAndPush(conf Config, repo *git.Repository, hash plumbing.Hash, branch, 
 			return err
 		}
 
-		target, err := filepath.Rel(branch, path)
+		fi, err := tree.Filesystem.Create(path)
 		if err != nil {
-			return err
-		}
-
-		fi, err := tree.Filesystem.Create(target)
-		if err != nil {
-			return err
+			return fmt.Errorf("creating file %q: %w", path, err)
 		}
 
 		_, err = fi.Write(contents)
 		if err != nil {
-			return err
+			return fmt.Errorf("writing file %q: %w", path, err)
 		}
 
 		return fi.Close()
