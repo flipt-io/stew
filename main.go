@@ -14,36 +14,16 @@ import (
 	"code.gitea.io/sdk/gitea"
 	"github.com/go-git/go-billy/v5/memfs"
 	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
+	gitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/peterbourgon/ff/v3"
+	"go.flipt.io/stew/config"
 	"golang.org/x/exp/slog"
 	"gopkg.in/yaml.v2"
 )
-
-type Config struct {
-	URL   string `json:"url"`
-	Admin struct {
-		Username string `json:"username"`
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	} `json:"admin"`
-	Repositories []Repository `json:"repositories"`
-}
-
-type Content struct {
-	Path    string `json:"path"`
-	Message string `json:"message"`
-}
-
-type Repository struct {
-	Name     string    `json:"name"`
-	Contents []Content `json:"contents"`
-	PRs      []Content `json:"prs"`
-}
 
 func fatalOnError(err error) {
 	if err != nil {
@@ -68,7 +48,7 @@ func main() {
 	fi, err := os.Open(*configPath)
 	fatalOnError(err)
 
-	var conf Config
+	var conf config.Config
 	fatalOnError(yaml.NewDecoder(fi).Decode(&conf))
 
 	slog.Debug("Parsed config", "config", conf)
@@ -97,14 +77,19 @@ func main() {
 		})
 		fatalOnError(err)
 
-		repo.CreateRemote(&config.RemoteConfig{
+		repo.CreateRemote(&gitconfig.RemoteConfig{
 			Name: "origin",
 			URLs: []string{fmt.Sprintf("%s/%s/%s.git", conf.URL, conf.Admin.Username, repository.Name)},
 		})
 
 		hash := plumbing.ZeroHash
 		for _, content := range repository.Contents {
-			commit, err := copyAndPush(conf, repo, hash, "main", content.Message, os.DirFS(content.Path))
+			branch := "main"
+			if content.Branch != "" {
+				branch = content.Branch
+			}
+
+			commit, err := copyAndPush(conf, repo, hash, branch, content.Message, os.DirFS(content.Path))
 			fatalOnError(err)
 
 			hash = commit
@@ -112,6 +97,10 @@ func main() {
 
 		for _, content := range repository.PRs {
 			branch := path.Dir(content.Path)
+			if content.Branch != "" {
+				branch = content.Branch
+			}
+
 			_, err := copyAndPush(conf, repo, hash, branch, content.Message, os.DirFS(content.Path))
 			fatalOnError(err)
 
@@ -126,9 +115,9 @@ func main() {
 	}
 }
 
-func setupGitea(cfg Config) error {
+func setupGitea(conf config.Config) error {
 	for i := 0; true; i++ {
-		_, err := http.Get(cfg.URL)
+		_, err := http.Get(conf.URL)
 		if err == nil {
 			break
 		}
@@ -146,12 +135,12 @@ func setupGitea(cfg Config) error {
 		return err
 	}
 
-	val.Set("admin_name", cfg.Admin.Username)
-	val.Set("admin_passwd", cfg.Admin.Password)
-	val.Set("admin_confirm_passwd", cfg.Admin.Password)
-	val.Set("admin_email", cfg.Admin.Email)
+	val.Set("admin_name", conf.Admin.Username)
+	val.Set("admin_passwd", conf.Admin.Password)
+	val.Set("admin_confirm_passwd", conf.Admin.Password)
+	val.Set("admin_email", conf.Admin.Email)
 
-	resp, err := http.PostForm(cfg.URL, val)
+	resp, err := http.PostForm(conf.URL, val)
 	if err != nil {
 		return err
 	}
@@ -163,9 +152,9 @@ func setupGitea(cfg Config) error {
 	return nil
 }
 
-func giteaClient(cfg Config) (cli *gitea.Client, err error) {
+func giteaClient(conf config.Config) (cli *gitea.Client, err error) {
 	for i := 0; i < 20; i++ {
-		cli, err = gitea.NewClient(cfg.URL, gitea.SetBasicAuth(cfg.Admin.Username, cfg.Admin.Password))
+		cli, err = gitea.NewClient(conf.URL, gitea.SetBasicAuth(conf.Admin.Username, conf.Admin.Password))
 		if err != nil {
 			time.Sleep(time.Second)
 			continue
@@ -188,7 +177,7 @@ func createRepo(cli *gitea.Client, repository string) (*gitea.Repository, error)
 	return origin, err
 }
 
-func copyAndPush(conf Config, repo *git.Repository, hash plumbing.Hash, branch, message string, src fs.FS) (plumbing.Hash, error) {
+func copyAndPush(conf config.Config, repo *git.Repository, hash plumbing.Hash, branch, message string, src fs.FS) (plumbing.Hash, error) {
 	tree, err := repo.Worktree()
 	if err != nil {
 		return plumbing.ZeroHash, err
@@ -196,7 +185,7 @@ func copyAndPush(conf Config, repo *git.Repository, hash plumbing.Hash, branch, 
 
 	// checkout branch if not main from provided hash
 	if hash != plumbing.ZeroHash && branch != "main" {
-		if err := repo.CreateBranch(&config.Branch{
+		if err := repo.CreateBranch(&gitconfig.Branch{
 			Name: branch,
 		}); err != nil {
 			return plumbing.ZeroHash, err
@@ -264,9 +253,9 @@ func copyAndPush(conf Config, repo *git.Repository, hash plumbing.Hash, branch, 
 	if err := repo.Push(&git.PushOptions{
 		Auth:       &githttp.BasicAuth{Username: conf.Admin.Username, Password: conf.Admin.Password},
 		RemoteName: "origin",
-		RefSpecs: []config.RefSpec{
-			config.RefSpec(fmt.Sprintf("%s:refs/heads/%s", branch, branch)),
-			config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", branch, branch)),
+		RefSpecs: []gitconfig.RefSpec{
+			gitconfig.RefSpec(fmt.Sprintf("%s:refs/heads/%s", branch, branch)),
+			gitconfig.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", branch, branch)),
 		},
 	}); err != nil {
 		return plumbing.ZeroHash, err
